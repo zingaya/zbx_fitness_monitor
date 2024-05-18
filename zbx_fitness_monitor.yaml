@@ -1,0 +1,324 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 26f42bba0c4448c290fa5423bb4a2664
+      name: 'Custom Templates'
+  templates:
+    - uuid: c900aa7fc477445b8d8e6b08b995cfae
+      template: 'Fitness monitor'
+      name: 'Fitness monitor'
+      description: |
+        Proof of concept.
+        - A Python code to read BLE from a heart beat sensor and use Zabbix sender Python libraries to send data.
+        - A Javascript code to read from zabbix API, find the last retrieved strava activity ID, and import the next activity that has a heart rate data into Zabbix using API.
+      groups:
+        - name: 'Custom Templates'
+      items:
+        - uuid: 5eab88d53b774f31b5d4371fff66a373
+          name: Age
+          type: CALCULATED
+          key: age
+          delay: 30m
+          history: 1h
+          trends: '0'
+          value_type: FLOAT
+          params: '(now()-{$BIRTH})/3600/24/365.25'
+          preprocessing:
+            - type: DISCARD_UNCHANGED
+              parameters:
+                - ''
+        - uuid: 044add8952e3405db44ceb56f1935523
+          name: BMI
+          type: CALCULATED
+          key: BMI
+          delay: 30m
+          history: 1000d
+          trends: '0'
+          value_type: FLOAT
+          params: 'last(//weight)/power({$HEIGHT}/100,2)'
+          description: 'Body mass index (BMI) is a value derived from the mass (weight) and height of a person. The BMI is defined as the body mass divided by the square of the body height, and is expressed in units of kg/m2, resulting from mass in kilograms (kg) and height in metres (m).'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+        - uuid: 2189f313e660403da0c12251a15f2be2
+          name: 'Calories per minute'
+          type: CALCULATED
+          key: cal1m
+          delay: 0;m/1
+          history: 90d
+          trends: 1000d
+          value_type: FLOAT
+          units: cal
+          params: '(0.6309*avg(//heartrate,1m)+0.1988*last(//weight)+0.2017*last(//age)-55.0969)/4.184'
+          description: |
+            CB = T × (0.6309×H + 0.1988×W + 0.2017×A - 55.0969) / 4.184
+            
+            where:
+            
+                CB – Number of calories burned;
+                T – Duration of exercise in minutes;
+                H – Your average heart rate in beats per minute;
+                W – Your weight in kilograms; and
+                A – Your age in years.
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '1000'
+        - uuid: 9139a0de16c5448ab14bc7b81cd26bc2
+          name: 'Calories today'
+          type: CALCULATED
+          key: calday
+          history: 90d
+          trends: 1000d
+          value_type: FLOAT
+          units: cal
+          params: 'sum(//cal1m,1d:now/d+1d)'
+        - uuid: 7db4369a930b4aeb93f05b2ba7ee1e86
+          name: 'Heart rate'
+          type: TRAP
+          key: heartrate
+          delay: '0'
+          history: 90d
+          trends: 1000d
+          units: bpm
+          preprocessing:
+            - type: IN_RANGE
+              parameters:
+                - '1'
+                - ''
+        - uuid: 0cbcd4278f004ce4bd0a25a77b90c93f
+          name: 'Heart rate reserve (HRR)'
+          type: CALCULATED
+          key: hrr
+          history: 1000d
+          trends: '0'
+          params: last(//mhr)-last(//rhr)
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+        - uuid: 98ae6d3ab09e404a901d39e8397205c4
+          name: 'Maximum heart rate (MHR) - Last month'
+          type: CALCULATED
+          key: mhr.month
+          delay: 30m
+          history: 1000d
+          trends: '0'
+          params: 'max(//heartrate,30d)'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+        - uuid: 3fa74ef455fe4b809f6f10a0a58a1e42
+          name: 'Maximum heart rate (MHR) - Theorical'
+          type: CALCULATED
+          key: mhr.theorical
+          delay: 30m
+          history: 1000d
+          trends: '0'
+          params: 220-last(//age)
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+        - uuid: 079df717cf544d81a829a5ebf8a27880
+          name: '% Heart rate reserve (%HRR)'
+          type: CALCULATED
+          key: perhrr
+          delay: 0;m/1
+          history: 90d
+          trends: 1000d
+          value_type: FLOAT
+          units: '%'
+          params: '(avg(//heartrate,1m)-last(//rhr))/last(//hrr)'
+        - uuid: aae190a4965e44d586c5eac608e6a5e3
+          name: 'Resting heart rate (RHR)'
+          type: CALCULATED
+          key: rhr
+          delay: 5m
+          history: 1000d
+          trends: '0'
+          params: 'trendmin(//heartrate,1y:now)'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+        - uuid: a88ab8fe770b419b80ec54375f0ac550
+          name: 'Strava activities'
+          type: SCRIPT
+          key: strava.id
+          delay: 5m
+          history: 1000d
+          trends: '0'
+          params: |
+            // Constants
+            const params = JSON.parse(value);
+            const stravatoken = {
+              "client_id": params.clientid,
+              "client_secret": params.secret,
+              "refresh_token": params.refreshtoken,
+              "grant_type": "refresh_token"
+            };
+            const zabbixapiUrl = params.zurl + '/api_jsonrpc.php';
+            const stravaapiUrl = 'https://www.strava.com/api/v3/';
+            const stravoauthUrl = 'https://www.strava.com/oauth/token';
+            const stravaactivitiesUrl = stravaapiUrl + 'athlete/activities';
+            const zabbixHost = 'HeartRate';
+            
+            // Initialize Zabbix API
+            var requestzapi = new HttpRequest();
+            requestzapi.addHeader('Content-Type: application/json');
+            requestzapi.addHeader('Authorization: Bearer ' + params.ztoken);
+            
+            // Initialize Strava API
+            var requeststravaapi = new HttpRequest();
+            requeststravaapi.addHeader('Content-Type: application/json');
+            var accesstoken = JSON.parse(requeststravaapi.post(stravoauthUrl, JSON.stringify(stravatoken))).access_token;
+            requeststravaapi.addHeader('Authorization: Bearer ' + accesstoken);
+            
+            // Functions
+            // Find item id in Zabbix
+            function finditemid(host, key) {
+              zabbixDataApi = {
+                "jsonrpc": "2.0",
+                "method": "item.get",
+                "params": {
+                  "output": "extend",
+                  "selectHosts": "" + host + "",
+                  "search": {
+                    "key_": key
+                  }
+                },
+                "id": 1
+              };
+              var itemId = JSON.parse(requestzapi.get(zabbixapiUrl, JSON.stringify(zabbixDataApi))).result[0].itemid;
+              return parseInt(itemId, 10);
+            }
+            
+            // Transforming the activity stream JSON
+            function transformStreams(streams, startDate) {
+              var heartrateitemid = finditemid(zabbixHost, "heartrate");
+              var timeData = streams.time.data;
+              var heartrateData = streams.heartrate.data || [];
+              var transformedData = [];
+            
+              for (var i = 0; i < timeData.length; i++) {
+                var startDateUnix = new Date(startDate).getTime() / 1000;
+                var time = startDateUnix + timeData[i];
+                var heartrate = heartrateData[i] || null;
+                transformedData.push({ itemid: heartrateitemid, clock: time, value: heartrate });
+              }
+            
+              return transformedData;
+            }
+            
+            // Search last 10 activities in Strava
+            var stravaactivities = JSON.parse(requeststravaapi.get(stravaactivitiesUrl + "?per_page=30&page=1"));
+            
+            // Find self item id in Zabbix
+            var selfitemid = finditemid(zabbixHost, "strava.id");
+            
+            // Find last Strava activity ID from history in Zabbix and save the value for later
+            zabbixDataApi = {
+              "jsonrpc": "2.0",
+              "method": "history.get",
+              "params": {
+                "output": "extend",
+                "history": 3,
+                "itemids": "" + selfitemid + "",
+                "sortfield": "clock",
+                "sortorder": "DESC",
+                "limit": 1
+              },
+              "id": 1
+            }
+            
+            var zabbixactivityid = 0;
+            var zabbixresult = requestzapi.get(zabbixapiUrl, JSON.stringify(zabbixDataApi));
+            try {
+              zabbixactivityid = JSON.parse(zabbixresult).result[0].value;
+            } catch (error) {
+            
+            }
+            
+            // Search for the next activity ID in Strava that has Heart Rate
+            var nextActivityId = null;
+            var activityStartDate = null;
+            for (var i = 0; i < stravaactivities.length; i++) {
+              if (stravaactivities[i].id > zabbixactivityid && stravaactivities[i].has_heartrate) {
+                nextActivityId = stravaactivities[i].id;
+                activityStartDate = stravaactivities[i].start_date;
+                break;
+              }
+            }
+            
+            if (nextActivityId === null) {
+              // If no next activity ID is found or all activities have no heart rate data, return an empty object
+              return zabbixactivityid;
+            } else {
+              // Find the next activity's heart rate data and transform it
+              var stravaactivitystream = stravaapiUrl + 'activities/' + nextActivityId + '/streams?keys=heartrate,time&key_by_type=true';
+              var heartrateData = transformStreams(JSON.parse(requeststravaapi.get(stravaactivitystream)), activityStartDate);
+            }
+            
+            // Push Heart Rate data using history.push method
+            zabbixPushApi = {
+              "jsonrpc": "2.0",
+              "method": "history.push",
+              "params": heartrateData,
+              "id": 1
+            }
+            
+            try {
+              var response = JSON.parse(requestzapi.get(zabbixapiUrl, JSON.stringify(zabbixPushApi)));
+              return (response.result.response == "success") ? nextActivityId : JSON.stringify(response);
+            } catch (error) {
+              return error;
+            }
+          preprocessing:
+            - type: DISCARD_UNCHANGED
+              parameters:
+                - ''
+          parameters:
+            - name: clientid
+              value: '{$CLIENTID}'
+            - name: refreshtoken
+              value: '{$REFRESHTOKEN}'
+            - name: secret
+              value: '{$SECRET}'
+            - name: ztoken
+              value: '{$ZABBIX_API.TOKEN}'
+            - name: zurl
+              value: '{$ZABBIX.URL}'
+        - uuid: 2c881e5d900c4a5498b660e43aac998b
+          name: Weight
+          type: CALCULATED
+          key: weight
+          delay: 5m
+          trends: 1000d
+          value_type: FLOAT
+          params: '{$WEIGHT}'
+          description: 'Weight can change, unless you have an smart scale to send data to Zabbix, you should edit the macro and let Zabbix keep track of your weight'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+      macros:
+        - macro: '{$ACCESSTOKEN}'
+          description: 'Strava API access token'
+        - macro: '{$BIRTH}'
+          description: 'In unixtime'
+        - macro: '{$CLIENTID}'
+          description: 'Strava API client ID'
+        - macro: '{$HEIGHT}'
+          description: cm
+        - macro: '{$SECRET}'
+          description: 'Strava API secret'
+        - macro: '{$WEIGHT}'
+          description: kg
+        - macro: '{$ZABBIX.URL}'
+          value: 'http://'
+          description: 'Zabbix API URL'
+        - macro: '{$ZABBIX_API.TOKEN}'
+          description: 'Zabbix API token'
